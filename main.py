@@ -1,18 +1,19 @@
-from flask import Flask, request, jsonify
-from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from PIL import Image
 import requests
 import numpy as np
 import cv2
+import os
+from google.oauth2.service_account import Credentials
+from flask import Flask, request, jsonify
 
 app = Flask(__name__)
-
+# Cambiar ruta de credenciales
+GOOGLE_CREDENTIALS = os.getenv('GOOGLE_CREDENTIALS', 'credentials.json')
 # Configuración de Google Sheets
 SPREADSHEET_ID = "1247WriRrUZSXep9Txj0398oXOtVWLnnI7JO5uS5pCGU"  # ID del Google Sheet
 SHEET_NAME = "Base de Datos"  # Nombre de la hoja
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
-GOOGLE_CREDENTIALS = "credentials.json"  # Ruta al archivo de credenciales
 
 # Autenticación de Google Sheets
 def get_sheet_data():
