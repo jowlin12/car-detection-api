@@ -1,73 +1,85 @@
 from flask import Flask, request, jsonify
 import cv2
 import numpy as np
-import gspread
-from oauth2client.service_account import ServiceAccountCredentials
 import requests
-from io import BytesIO
 
 app = Flask(__name__)
 
-# Función para comparar imágenes
-def compare_images(img1_url, img2_url):
-    # Descargar imágenes
-    img1 = cv2.imdecode(np.asarray(bytearray(requests.get(img1_url).content), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
-    img2 = cv2.imdecode(np.asarray(bytearray(requests.get(img2_url).content), dtype=np.uint8), cv2.IMREAD_GRAYSCALE)
 
-    # Detectar y calcular características con ORB
-    orb = cv2.ORB_create()
-    keypoints1, descriptors1 = orb.detectAndCompute(img1, None)
-    keypoints2, descriptors2 = orb.detectAndCompute(img2, None)
+# Función para descargar y convertir imágenes a escala de grises
+def download_image_as_grayscale(image_url):
+    try:
+        response = requests.get(image_url)
+        response.raise_for_status()  # Verifica errores HTTP
+        img_array = np.asarray(bytearray(response.content), dtype=np.uint8)
+        img = cv2.imdecode(img_array, cv2.IMREAD_GRAYSCALE)
+        if img is None:
+            raise ValueError("No se pudo decodificar la imagen.")
+        return img
+    except Exception as e:
+        raise RuntimeError(f"Error al descargar o procesar la imagen: {e}")
 
-    # Comparar las características
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = bf.match(descriptors1, descriptors2)
 
-    # Calcular similitud
-    similarity = len(matches) / min(len(keypoints1), len(keypoints2))
-    return similarity
+# Función para comparar dos imágenes usando características ORB
+def compare_images(img1, img2):
+    try:
+        orb = cv2.ORB_create()
+        keypoints1, descriptors1 = orb.detectAndCompute(img1, None)
+        keypoints2, descriptors2 = orb.detectAndCompute(img2, None)
 
-# Conexión a Google Sheets
-def get_car_data(sheet_name, credentials_path):
-    scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-    creds = ServiceAccountCredentials.from_json_keyfile_name(credentials_path, scope)
-    client = gspread.authorize(creds)
+        if descriptors1 is None or descriptors2 is None:
+            raise ValueError("No se encontraron descriptores en una o ambas imágenes.")
 
-    sheet = client.open(sheet_name).sheet1
-    data = sheet.get_all_records()
-    return data
+        bf = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+        matches = bf.match(descriptors1, descriptors2)
+        similarity = len(matches) / min(len(keypoints1), len(keypoints2))
+        return similarity
+    except Exception as e:
+        raise RuntimeError(f"Error al comparar imágenes: {e}")
 
-# Endpoint principal
+
 @app.route('/api/detect', methods=['POST'])
 def detect_car():
     try:
-        # Obtener datos de la solicitud
-        input_image_url = request.json.get("image_url")
-        if not input_image_url:
-            return jsonify({"error": "No image URL provided"}), 400
+        # Validar datos de entrada
+        data = request.get_json()
+        if not data or "image_url" not in data or "references" not in data:
+            return jsonify({"error": "El cuerpo debe incluir 'image_url' y 'references'."}), 400
 
-        # Cargar datos del sheet
-        sheet_name = "CarDatabase"
-        credentials_path = "credentials.json"  # Asegúrate de incluir esto en tu proyecto
-        car_data = get_car_data(sheet_name, credentials_path)
+        image_url = data["image_url"]
+        references = data["references"]  # Lista de referencias { "brand": ..., "type": ..., "image_url": ... }
 
-        # Comparar con las imágenes de referencia
+        if not isinstance(references, list) or len(references) == 0:
+            return jsonify({"error": "El campo 'references' debe ser una lista con datos."}), 400
+
+        # Descargar imagen de entrada
+        input_image = download_image_as_grayscale(image_url)
+
+        # Variables para almacenar la mejor coincidencia
         best_match = None
         highest_similarity = 0
 
-        for car in car_data:
-            similarity = compare_images(input_image_url, car["Image URL"])
+        # Comparar la imagen de entrada con las referencias
+        for ref in references:
+            if "brand" not in ref or "type" not in ref or "image_url" not in ref:
+                continue  # Ignorar referencias incompletas
+
+            ref_image_url = ref["image_url"]
+            ref_image = download_image_as_grayscale(ref_image_url)
+            similarity = compare_images(input_image, ref_image)
+
             if similarity > highest_similarity:
                 highest_similarity = similarity
-                best_match = car
+                best_match = {"brand": ref["brand"], "type": ref["type"], "similarity": similarity}
 
         if best_match:
-            return jsonify({"brand": best_match["Brand"], "type": best_match["Type"]})
+            return jsonify(best_match)
         else:
-            return jsonify({"error": "No matching car found"}), 404
+            return jsonify({"error": "No se encontró una coincidencia adecuada."}), 404
 
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
+
 if __name__ == "__main__":
-    app.run()
+    app.run(debug=True)
