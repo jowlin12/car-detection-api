@@ -1,95 +1,87 @@
 from flask import Flask, request, jsonify
-import cv2
-import numpy as np
-import requests
+from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.errors import HttpError
-from google.oauth2 import service_account
-import io
 from PIL import Image
+import requests
+import numpy as np
+import cv2
 
-# Configuración de Google Sheets
-SPREADSHEET_ID = "1247WriRrUZSXep9Txj0398oXOtVWLnnI7JO5uS5pCGU"
-SHEET_NAME = "Base de Datos"
-CREDENTIALS_PATH = "credentials.json"  # Ruta al archivo de credenciales
-
-# Configuración de Flask
 app = Flask(__name__)
 
-# Función para descargar imágenes desde una URL
-def descargar_imagen(url):
+# Configuración de Google Sheets
+SPREADSHEET_ID = "1247WriRrUZSXep9Txj0398oXOtVWLnnI7JO5uS5pCGU"  # ID del Google Sheet
+SHEET_NAME = "Base de Datos"  # Nombre de la hoja
+SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+GOOGLE_CREDENTIALS = "credentials.json"  # Ruta al archivo de credenciales
+
+# Autenticación de Google Sheets
+def get_sheet_data():
+    credentials = Credentials.from_service_account_file(GOOGLE_CREDENTIALS, scopes=SCOPES)
+    service = build("sheets", "v4", credentials=credentials)
+    sheet = service.spreadsheets()
+    result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=SHEET_NAME).execute()
+    rows = result.get("values", [])
+    return rows[1:]  # Excluye el encabezado
+
+# Función para descargar imágenes desde URL y convertirlas a matrices
+def download_image_as_array(url):
     try:
         response = requests.get(url)
-        image = Image.open(io.BytesIO(response.content))
-        return cv2.cvtColor(np.array(image), cv2.COLOR_RGB2BGR)
+        img = Image.open(requests.get(url, stream=True).raw).convert("RGB")
+        return np.array(img)
     except Exception as e:
-        print(f"Error al descargar la imagen: {e}")
+        print(f"Error descargando la imagen {url}: {e}")
         return None
 
-# Función para obtener datos del Google Sheet
-def obtener_datos_sheet():
+# Función para comparar imágenes usando la diferencia estructural (SSIM)
+def compare_images(img1, img2):
     try:
-        credentials = service_account.Credentials.from_service_account_file(CREDENTIALS_PATH)
-        service = build('sheets', 'v4', credentials=credentials)
-        sheet = service.spreadsheets()
-
-        # Leer datos del sheet
-        result = sheet.values().get(spreadsheetId=SPREADSHEET_ID, range=SHEET_NAME).execute()
-        rows = result.get('values', [])
-        return rows[1:]  # Excluye la fila de encabezados
-    except HttpError as error:
-        print(f"Error al acceder a Google Sheets: {error}")
-        return []
-
-# Función para comparar imágenes usando histogramas
-def calcular_similitud(imagen1, imagen2):
-    try:
-        hist1 = cv2.calcHist([imagen1], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-        hist2 = cv2.calcHist([imagen2], [0, 1, 2], None, [8, 8, 8], [0, 256, 0, 256, 0, 256])
-        cv2.normalize(hist1, hist1)
-        cv2.normalize(hist2, hist2)
-        return cv2.compareHist(hist1, hist2, cv2.HISTCMP_CORREL)
+        img1 = cv2.cvtColor(cv2.resize(img1, (256, 256)), cv2.COLOR_RGB2GRAY)
+        img2 = cv2.cvtColor(cv2.resize(img2, (256, 256)), cv2.COLOR_RGB2GRAY)
+        score = cv2.matchTemplate(img1, img2, cv2.TM_CCOEFF_NORMED).max()
+        return score
     except Exception as e:
-        print(f"Error al calcular similitud: {e}")
-        return 0
+        print(f"Error comparando imágenes: {e}")
+        return -1
 
-@app.route('/api/detect', methods=['POST'])
-def detectar_imagen():
-    try:
-        data = request.get_json()
-        url_imagen = data.get('image_url')
+@app.route("/compare", methods=["POST"])
+def compare():
+    # Obtener URL de la imagen enviada
+    data = request.get_json()
+    if "image_url" not in data:
+        return jsonify({"error": "Falta 'image_url' en el cuerpo de la solicitud"}), 400
 
-        if not url_imagen:
-            return jsonify({"error": "Falta la URL de la imagen"}), 400
+    input_url = data["image_url"]
+    input_image = download_image_as_array(input_url)
+    if input_image is None:
+        return jsonify({"error": "No se pudo descargar la imagen proporcionada"}), 400
 
-        # Descargar imagen a clasificar
-        imagen_principal = descargar_imagen(url_imagen)
-        if imagen_principal is None:
-            return jsonify({"error": "No se pudo descargar la imagen principal"}), 400
+    # Obtener imágenes y datos del Google Sheet
+    rows = get_sheet_data()
+    if not rows:
+        return jsonify({"error": "No se encontraron datos en la hoja"}), 500
 
-        # Obtener datos del Google Sheet
-        datos_sheet = obtener_datos_sheet()
+    best_match = {"brand": None, "type": None, "score": -1}
 
-        # Variables para rastrear la mejor coincidencia
-        mejor_similitud = 0
-        mejor_resultado = {"marca": None, "tipo": None}
+    # Comparar la imagen con todas las imágenes en el Sheet
+    for row in rows:
+        image_url, brand, car_type = row
+        sheet_image = download_image_as_array(image_url)
+        if sheet_image is None:
+            continue
 
-        # Comparar con imágenes del sheet
-        for fila in datos_sheet:
-            url_base, marca, tipo = fila
-            imagen_base = descargar_imagen(url_base)
-            if imagen_base is None:
-                continue
+        score = compare_images(input_image, sheet_image)
+        if score > best_match["score"]:
+            best_match = {"brand": brand, "type": car_type, "score": score}
 
-            similitud = calcular_similitud(imagen_principal, imagen_base)
-            if similitud > mejor_similitud:
-                mejor_similitud = similitud
-                mejor_resultado = {"marca": marca, "tipo": tipo}
+    if best_match["score"] == -1:
+        return jsonify({"error": "No se encontraron coincidencias"}), 404
 
-        return jsonify(mejor_resultado)
+    return jsonify({
+        "brand": best_match["brand"],
+        "type": best_match["type"],
+        "similarity_score": best_match["score"]
+    })
 
-    except Exception as e:
-        return jsonify({"error": str(e)}), 500
-
-if __name__ == '__main__':
+if __name__ == "__main__":
     app.run(debug=True)
