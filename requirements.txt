@@ -1,6 +1,8 @@
-Flask
-opencv-python
+flask
 numpy
-gspread
-oauth2client
-requests
+opencv-python
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
+pillow
