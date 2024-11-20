@@ -1,0 +1,6 @@
+Flask
+opencv-python
+numpy
+gspread
+oauth2client
+requests
